@@ -1,0 +1,1209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Financial Proposal Configurator</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'DM Sans', system-ui, sans-serif; background: #F7F9FB; color: #1B2038; }
+  input, select, button { font-family: inherit; }
+  ::-webkit-scrollbar { height: 6px; width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #D0D5DD; border-radius: 3px; }
+  @media print {
+    .no-print { display: none !important; }
+    body { background: white; font-size: 11px; }
+    #print-proposal { display: block !important; }
+    #root { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="print-proposal" style="display:none"></div>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo } = React;
+
+const COLORS = {
+  primary: "#004A91", accent: "#2678A5", gold: "#D9B645", light: "#DBE2E9",
+  bg: "#F7F9FB", white: "#FFFFFF", dark: "#1B2038", muted: "#7A8699",
+  red: "#C0392B", green: "#2E7D32", inputBg: "#FDF6E3", calcBg: "#EAF0F7", border: "#D0D5DD",
+};
+
+const FEE_TYPES = ["Fixed", "Pct", "Range"];
+
+const DEFAULT_PRODUCTS = [
+  { id: 1, name: "Legal Research Platform + Research Assistant", perUser: false, price: 15000, hasMig: false, migType: "Fixed", migMin: 0, migMax: 0, hasDep: false, depType: "Fixed", depMin: 0, depMax: 0, hasMnt: true, mntType: "Pct", mntMin: 0.10, mntMax: 0.10 },
+  { id: 2, name: "Litigation and Consultancy Assistant", perUser: false, price: 25000, hasMig: true, migType: "Range", migMin: 5000, migMax: 8000, hasDep: true, depType: "Range", depMin: 1000, depMax: 2500, hasMnt: true, mntType: "Pct", mntMin: 0.10, mntMax: 0.10 },
+  { id: 3, name: "Contracts Assistant", perUser: false, price: 25000, hasMig: true, migType: "Range", migMin: 5000, migMax: 8000, hasDep: true, depType: "Range", depMin: 1000, depMax: 2500, hasMnt: true, mntType: "Pct", mntMin: 0.10, mntMax: 0.10 },
+  { id: 4, name: "Maktab", perUser: false, price: 15000, hasMig: true, migType: "Range", migMin: 5000, migMax: 8000, hasDep: true, depType: "Range", depMin: 500, depMax: 1000, hasMnt: true, mntType: "Pct", mntMin: 0.10, mntMax: 0.10 },
+  { id: 5, name: "Vault", perUser: false, price: 50000, hasMig: false, migType: "Fixed", migMin: 0, migMax: 0, hasDep: true, depType: "Range", depMin: 500, depMax: 1000, hasMnt: true, mntType: "Pct", mntMin: 0.10, mntMax: 0.10 },
+];
+
+const DEFAULT_ADDL_CONFIGS = [
+  { id: 1, name: "", type: "Range", minVal: 0, maxVal: 0 },
+];
+
+const fmt = (n) => n == null ? "—" : n.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+const fmtPct = (n) => n == null ? "—" : (n * 100).toFixed(1) + "%";
+
+function calcServiceFee(has, type, input, license) {
+  if (!has) return 0;
+  if (type === "Fixed") return input || 0;
+  if (type === "Pct") return (input || 0) * license;
+  if (type === "Range") return input || 0;
+  return 0;
+}
+
+function calcProduct(p, users) {
+  const unitPrice = (p.perUser && p.priceFreq === "monthly") ? p.price * 12 : p.price;
+  const license = p.perUser ? unitPrice * users : unitPrice;
+
+  // For Fixed and Pct types, max always equals min (the "Max" field is ignored)
+  const calcMin = (has, type, minVal, maxVal, lic) => {
+    if (!has) return 0;
+    if (type === "Fixed") return minVal || 0;
+    if (type === "Pct")   return (minVal || 0) * lic;
+    if (type === "Range") return minVal || 0;
+    return 0;
+  };
+  const calcMax = (has, type, minVal, maxVal, lic) => {
+    if (!has) return 0;
+    if (type === "Fixed") return minVal || 0;           // Fixed: max always equals min
+    if (type === "Pct")   return (maxVal || minVal || 0) * lic; // Pct: use maxVal rate if set
+    if (type === "Range") return maxVal || 0;            // Range: distinct max
+    return 0;
+  };
+
+  return {
+    ...p, license,
+    migMinCalc: calcMin(p.hasMig, p.migType, p.migMin, p.migMax, license),
+    migMaxCalc: calcMax(p.hasMig, p.migType, p.migMin, p.migMax, license),
+    depMinCalc: calcMin(p.hasDep, p.depType, p.depMin, p.depMax, license),
+    depMaxCalc: calcMax(p.hasDep, p.depType, p.depMin, p.depMax, license),
+    mntMinCalc: calcMin(p.hasMnt, p.mntType, p.mntMin, p.mntMax, license),
+    mntMaxCalc: calcMax(p.hasMnt, p.mntType, p.mntMin, p.mntMax, license),
+  };
+}
+
+function MiniBar({ data, colors, height = 160, labels }) {
+  const max = Math.max(...data.flat(), 1);
+  return (
+    <div style={{ width: "100%", position: "relative", height, display: "flex", alignItems: "flex-end", gap: 2, paddingBottom: 24 }}>
+      {data[0].map((_, i) => (
+        <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+          <div style={{ display: "flex", gap: 2, alignItems: "flex-end", width: "100%", height: height - 24, justifyContent: "center" }}>
+            {data.map((series, si) => (
+              <div key={si} style={{ width: `${100 / data.length - 4}%`, minWidth: 14, height: `${(series[i] / max) * 100}%`, minHeight: 2, background: colors[si], borderRadius: "4px 4px 0 0", transition: "height 0.5s ease" }} title={fmt(series[i])} />
+            ))}
+          </div>
+          {labels && <span style={{ fontSize: 10, color: COLORS.muted, whiteSpace: "nowrap" }}>{labels[i]}</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PieChart({ slices, size = 140 }) {
+  const total = slices.reduce((s, d) => s + d.value, 0);
+  if (total === 0) return null;
+  let cum = 0;
+  const paths = slices.filter(s => s.value > 0).map((s) => {
+    const start = cum / total; cum += s.value; const end = cum / total;
+    const large = end - start > 0.5 ? 1 : 0;
+    const r = size / 2 - 2, cx = size / 2, cy = size / 2;
+    const x1 = cx + r * Math.cos(2 * Math.PI * start - Math.PI / 2);
+    const y1 = cy + r * Math.sin(2 * Math.PI * start - Math.PI / 2);
+    const x2 = cx + r * Math.cos(2 * Math.PI * end - Math.PI / 2);
+    const y2 = cy + r * Math.sin(2 * Math.PI * end - Math.PI / 2);
+    return { d: `M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${large} 1 ${x2},${y2} Z`, color: s.color, label: s.label, pct: ((s.value / total) * 100).toFixed(1) };
+  });
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+      <svg width={size} height={size}>{paths.map((p, i) => <path key={i} d={p.d} fill={p.color} stroke={COLORS.white} strokeWidth={1.5} />)}</svg>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {paths.map((p, i) => (
+          <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+            <div style={{ width: 10, height: 10, borderRadius: 2, background: p.color, flexShrink: 0 }} />
+            <span style={{ color: COLORS.dark }}>{p.label} ({p.pct}%)</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const Card = ({ children, style }) => (
+  <div style={{ background: COLORS.white, borderRadius: 12, border: `1px solid ${COLORS.border}`, padding: 24, ...style }}>{children}</div>
+);
+
+const KPI = ({ label, value, sub, color }) => (
+  <div style={{ background: COLORS.calcBg, borderRadius: 10, padding: "16px 20px", flex: 1, minWidth: 140, borderLeft: `4px solid ${color || COLORS.primary}` }}>
+    <div style={{ fontSize: 22, fontWeight: 700, color: color || COLORS.primary }}>{value}</div>
+    <div style={{ fontSize: 11, color: COLORS.muted, marginTop: 2 }}>{label}</div>
+    {sub && <div style={{ fontSize: 10, color: COLORS.muted, marginTop: 2 }}>{sub}</div>}
+  </div>
+);
+
+const Input = ({ value, onChange, type = "text", style, ...rest }) => {
+  const [localVal, setLocalVal] = React.useState(String(value ?? ""));
+  React.useEffect(() => {
+    // Only sync from outside if the parsed value differs (avoids clobbering "0." while typing)
+    if (type === "number") {
+      const parsed = parseFloat(localVal);
+      if (isNaN(parsed) || parsed !== value) {
+        setLocalVal(String(value ?? ""));
+      }
+    } else {
+      setLocalVal(String(value ?? ""));
+    }
+  }, [value]);
+  const handleChange = (e) => {
+    const raw = e.target.value;
+    setLocalVal(raw);
+    if (type === "number") {
+      const parsed = parseFloat(raw);
+      if (!isNaN(parsed)) onChange(parsed);
+      else if (raw === "" || raw === "-") onChange(0);
+    } else {
+      onChange(raw);
+    }
+  };
+  return (
+    <input value={localVal} onChange={handleChange} type={type === "number" ? "text" : type} inputMode={type === "number" ? "decimal" : undefined}
+      style={{ padding: "6px 10px", border: `1px solid ${COLORS.border}`, borderRadius: 6, fontSize: 13, background: COLORS.inputBg, color: COLORS.primary, fontWeight: 600, outline: "none", width: "100%", boxSizing: "border-box", ...style }} {...rest} />
+  );
+};
+
+const Select = ({ value, onChange, options, style }) => {
+  const normalizedOptions = options.map(o =>
+    typeof o === "object" ? o : { value: o, label: o }
+  );
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)}
+      style={{ padding: "6px 8px", border: `1px solid ${COLORS.border}`, borderRadius: 6, fontSize: 12, background: COLORS.inputBg, color: COLORS.primary, fontWeight: 600, outline: "none", cursor: "pointer", width: "100%", boxSizing: "border-box", ...style }}>
+      {normalizedOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+    </select>
+  );
+};
+
+const Toggle = ({ value, onChange, style }) => (
+  <button onClick={() => onChange(!value)}
+    style={{ width: 40, height: 22, borderRadius: 12, border: "none", background: value ? COLORS.green : COLORS.border, cursor: "pointer", position: "relative", transition: "background 0.2s", flexShrink: 0, ...style }}>
+    <div style={{ width: 16, height: 16, borderRadius: 8, background: COLORS.white, position: "absolute", top: 3, left: value ? 20 : 4, transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
+  </button>
+);
+
+const SectionTitle = ({ children }) => (
+  <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.primary, textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>{children}</div>
+);
+
+const PAGES = [
+  { id: "settings", label: "Configuration", icon: "⚙" },
+  { id: "proposal", label: "Proposal Summary", icon: "📋" },
+  { id: "aggregate", label: "Aggregate Budget", icon: "☰" },
+  { id: "dashboard", label: "Dashboard", icon: "◆" },
+];
+
+function Nav({ page, setPage }) {
+  return (
+    <nav style={{ display: "flex", gap: 0, background: COLORS.primary, borderRadius: "10px", overflow: "hidden", marginBottom: 24 }}>
+      {PAGES.map(p => (
+        <button key={p.id} onClick={() => setPage(p.id)}
+          style={{ flex: 1, padding: "12px 8px", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600, letterSpacing: 0.3,
+            background: page === p.id ? COLORS.gold : "transparent",
+            color: page === p.id ? COLORS.dark : "rgba(255,255,255,0.7)",
+            transition: "all 0.2s", whiteSpace: "nowrap" }}>
+          <span style={{ marginRight: 4, fontSize: 10 }}>{p.icon}</span>{p.label}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+const thStyle = { padding: "10px 12px", fontSize: 11, fontWeight: 700, color: COLORS.white, background: COLORS.primary, textAlign: "left", whiteSpace: "nowrap", position: "sticky", top: 0, borderBottom: `2px solid ${COLORS.gold}` };
+const thGreen = { ...thStyle, background: "#1A6B3C" };
+const thAmber = { ...thStyle, background: "#8B5A00" };
+const thPurple = { ...thStyle, background: "#5B2C6F" };
+const tdStyle = (alt) => ({ padding: "8px 12px", fontSize: 12, color: COLORS.dark, background: alt ? COLORS.light + "60" : COLORS.white, borderBottom: `1px solid ${COLORS.border}`, verticalAlign: "middle" });
+const tdCalc = (alt) => ({ ...tdStyle(alt), background: alt ? COLORS.calcBg : "#F0F6FC", fontWeight: 600, fontFamily: "monospace" });
+
+function ServiceCols({ p, prefix, has, type, min, max, onChange }) {
+  const isPct = type === "Pct";
+  return (
+    <>
+      <td style={tdStyle(false)}><Toggle value={has} onChange={v => onChange({ [`has${prefix}`]: v })} /></td>
+      {has ? (
+        <>
+          <td style={tdStyle(false)}><Select value={type} onChange={v => onChange({ [`${prefix.toLowerCase()}Type`]: v })} options={FEE_TYPES} /></td>
+          <td style={tdStyle(false)}>
+            <Input type="number" value={min} onChange={v => onChange({ [`${prefix.toLowerCase()}Min`]: v })} style={{ width: 80, textAlign: "right" }} step={isPct ? 0.01 : 100} />
+            {isPct && <span style={{ fontSize: 9, color: COLORS.muted }}> of lic.</span>}
+          </td>
+          <td style={tdStyle(false)}>
+            {type === "Fixed" ? <span style={{ fontSize: 11, color: COLORS.muted, paddingLeft: 4 }}>= Min</span> :
+              <Input type="number" value={max} onChange={v => onChange({ [`${prefix.toLowerCase()}Max`]: v })} style={{ width: 80, textAlign: "right" }} step={isPct ? 0.01 : 100} />}
+          </td>
+        </>
+      ) : (
+        <td colSpan={3} style={{ ...tdStyle(false), textAlign: "center", color: COLORS.muted, fontSize: 11 }}>—</td>
+      )}
+    </>
+  );
+}
+
+function SettingsPage({ settings, setSettings, products, setProducts, addlConfigs, setAddlConfigs, sectionDescs, setSectionDescs }) {
+  const addProduct = () => setProducts([...products, { id: Date.now(), name: "", perUser: false, price: 0, priceFreq: "yearly", hasMig: false, migType: "Fixed", migMin: 0, migMax: 0, hasDep: false, depType: "Fixed", depMin: 0, depMax: 0, hasMnt: false, mntType: "Pct", mntMin: 0.10, mntMax: 0.10 }]);
+  const removeProduct = (id) => setProducts(products.filter(p => p.id !== id));
+  const updateProduct = (id, patch) => setProducts(products.map(p => p.id === id ? { ...p, ...patch } : p));
+
+  const addConfig = () => setAddlConfigs([...addlConfigs, { id: Date.now(), name: "", type: "Range", minVal: 0, maxVal: 0 }]);
+  const removeConfig = (id) => setAddlConfigs(addlConfigs.filter(c => c.id !== id));
+  const updateConfig = (id, patch) => setAddlConfigs(addlConfigs.map(c => c.id === id ? { ...c, ...patch } : c));
+
+  const descField = (key, placeholder) => (
+    <div style={{ marginBottom: 12 }}>
+      <label style={{ fontSize: 11, color: COLORS.muted, display: "block", marginBottom: 4 }}>Section Description <span style={{ color: COLORS.gold }}>(shown in proposal, print & Excel)</span></label>
+      <textarea value={sectionDescs[key]} onChange={e => setSectionDescs({ ...sectionDescs, [key]: e.target.value })}
+        placeholder={placeholder}
+        rows={2}
+        style={{ width: "100%", padding: "8px 10px", border: `1px solid ${COLORS.border}`, borderRadius: 6, fontSize: 12, background: COLORS.inputBg, color: COLORS.dark, outline: "none", resize: "vertical", fontFamily: "inherit", lineHeight: 1.5 }} />
+    </div>
+  );
+
+  // Section header component
+  const SectionHdr = ({ title, color, badge }) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+      <div style={{ width: 5, height: 26, borderRadius: 3, background: color }} />
+      <SectionTitle style={{ margin: 0 }}>{title}</SectionTitle>
+      {badge && <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 10, background: color + "22", color, fontWeight: 700 }}>{badge}</span>}
+    </div>
+  );
+
+  return (
+    <div>
+      {/* ── Global Settings ── */}
+      <Card>
+        <SectionTitle>Global Settings</SectionTitle>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
+          {[
+            { label: "Client Name", key: "client", type: "text" },
+            { label: "Licensed Users", key: "users", type: "number" },
+            { label: "Currency", key: "currency", type: "text" },
+            { label: "Contract Duration (Years)", key: "duration", type: "number" },
+            { label: "Annual Escalation Rate", key: "escalation", type: "number", step: 0.01, suffix: `(${fmtPct(settings.escalation)})` },
+          ].map(f => (
+            <div key={f.key}>
+              <label style={{ fontSize: 11, color: COLORS.muted, display: "block", marginBottom: 4 }}>{f.label} {f.suffix && <span style={{ color: COLORS.gold, fontWeight: 600 }}>{f.suffix}</span>}</label>
+              <Input type={f.type} value={settings[f.key]} onChange={v => setSettings({ ...settings, [f.key]: v })} step={f.step} />
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {/* ── 1. Annual Solution Licenses ── */}
+      <Card style={{ marginTop: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
+          <SectionHdr title="Annual Solution Licenses" color={COLORS.accent} badge="Annual" />
+          <button onClick={addProduct} style={{ padding: "8px 16px", background: COLORS.primary, color: COLORS.white, border: "none", borderRadius: 8, cursor: "pointer", fontSize: 12, fontWeight: 700, flexShrink: 0 }}>+ Add Product</button>
+        </div>
+        {descField("lic", "Describe the licensing model, included products, or any relevant notes…")}
+        <div style={{ overflowX: "auto", borderRadius: 8, border: `1px solid ${COLORS.border}` }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 520 }}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Product Name</th>
+                <th style={{ ...thStyle, textAlign: "center", width: 80 }}>Per User</th>
+                <th style={{ ...thStyle, textAlign: "right", width: 160 }}>Unit Price (& Freq.)</th>
+                <th style={{ ...thStyle, textAlign: "right", width: 140, background: COLORS.accent }}>Annual License</th>
+                <th style={{ ...thStyle, width: 36 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {products.map((p, i) => {
+                const cp = calcProduct(p, settings.users);
+                return (
+                  <tr key={p.id}>
+                    <td style={tdStyle(i % 2)}><Input value={p.name} onChange={v => updateProduct(p.id, { name: v })} style={{ minWidth: 180 }} placeholder="Enter product name…" /></td>
+                    <td style={{ ...tdStyle(i % 2), textAlign: "center" }}><Toggle value={p.perUser} onChange={v => updateProduct(p.id, { perUser: v })} /></td>
+                    <td style={tdStyle(i % 2)}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <Input type="number" value={p.price} onChange={v => updateProduct(p.id, { price: v })} style={{ width: 90, textAlign: "right" }} />
+                        {p.perUser && (
+                          <Select value={p.priceFreq || "yearly"} onChange={v => updateProduct(p.id, { priceFreq: v })}
+                            options={[{ value: "yearly", label: "/yr" }, { value: "monthly", label: "/mo" }]}
+                            style={{ width: 60, fontSize: 11, padding: "6px 4px" }} />
+                        )}
+                      </div>
+                    </td>
+                    <td style={tdCalc(i % 2)}>
+                      <span style={{ fontFamily: "monospace", fontSize: 13 }}>{fmt(cp.license)}</span>
+                      {p.perUser && <span style={{ fontSize: 9, color: COLORS.muted, display: "block" }}>×{settings.users} users{p.priceFreq === "monthly" ? " ×12mo" : ""}</span>}
+                    </td>
+                    <td style={tdStyle(i % 2)}><button onClick={() => removeProduct(p.id)} style={{ background: "none", border: "none", color: COLORS.red, cursor: "pointer", fontSize: 16, padding: 4, opacity: 0.5 }}>×</button></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ marginTop: 8, fontSize: 11, color: COLORS.muted }}>
+          <strong>Fee Types:</strong> Fixed = single amount | Pct = % of license (0.10 = 10%) | Range = separate min/max bounds
+        </div>
+      </Card>
+
+      {/* ── 2. Data Migration & Integration ── */}
+      <Card style={{ marginTop: 16 }}>
+        <SectionHdr title="Data Migration & Integration" color="#1A6B3C" badge="One-Time" />
+        {descField("mig", "Describe the migration scope, data sources, integration points, or assumptions…")}
+        <div style={{ overflowX: "auto", borderRadius: 8, border: `1px solid ${COLORS.border}` }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Product</th>
+                <th style={{ ...thGreen, textAlign: "center", width: 60 }}>On</th>
+                <th style={{ ...thGreen, width: 100 }}>Type</th>
+                <th style={{ ...thGreen, textAlign: "right", width: 120 }}>Min</th>
+                <th style={{ ...thGreen, textAlign: "right", width: 120 }}>Max</th>
+              </tr>
+            </thead>
+            <tbody>
+              {products.map((p, i) => (
+                <tr key={p.id}>
+                  <td style={tdStyle(i % 2)}>{p.name || <span style={{ color: COLORS.muted, fontStyle: "italic" }}>Unnamed product</span>}</td>
+                  <ServiceCols p={p} prefix="Mig" has={p.hasMig} type={p.migType} min={p.migMin} max={p.migMax} onChange={patch => updateProduct(p.id, patch)} />
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {/* ── 3. Deployment & Implementation ── */}
+      <Card style={{ marginTop: 16 }}>
+        <SectionHdr title="Deployment and Implementation" color="#8B5A00" badge="One-Time" />
+        {descField("dep", "Describe deployment approach, implementation phases, or any included services…")}
+        <div style={{ overflowX: "auto", borderRadius: 8, border: `1px solid ${COLORS.border}` }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Product</th>
+                <th style={{ ...thAmber, textAlign: "center", width: 60 }}>On</th>
+                <th style={{ ...thAmber, width: 100 }}>Type</th>
+                <th style={{ ...thAmber, textAlign: "right", width: 120 }}>Min</th>
+                <th style={{ ...thAmber, textAlign: "right", width: 120 }}>Max</th>
+              </tr>
+            </thead>
+            <tbody>
+              {products.map((p, i) => (
+                <tr key={p.id}>
+                  <td style={tdStyle(i % 2)}>{p.name || <span style={{ color: COLORS.muted, fontStyle: "italic" }}>Unnamed product</span>}</td>
+                  <ServiceCols p={p} prefix="Dep" has={p.hasDep} type={p.depType} min={p.depMin} max={p.depMax} onChange={patch => updateProduct(p.id, patch)} />
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {/* ── 4. Maintenance & Upgrade ── */}
+      <Card style={{ marginTop: 16 }}>
+        <SectionHdr title="Upgrades, Maintenance, and Support" color="#5B2C6F" badge="Annual" />
+        {descField("mnt", "Describe what is included in maintenance (SLA, support tiers, upgrade policy…)")}
+        <div style={{ overflowX: "auto", borderRadius: 8, border: `1px solid ${COLORS.border}` }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Product</th>
+                <th style={{ ...thPurple, textAlign: "center", width: 60 }}>On</th>
+                <th style={{ ...thPurple, width: 100 }}>Type</th>
+                <th style={{ ...thPurple, textAlign: "right", width: 120 }}>Min</th>
+                <th style={{ ...thPurple, textAlign: "right", width: 120 }}>Max</th>
+              </tr>
+            </thead>
+            <tbody>
+              {products.map((p, i) => (
+                <tr key={p.id}>
+                  <td style={tdStyle(i % 2)}>{p.name || <span style={{ color: COLORS.muted, fontStyle: "italic" }}>Unnamed product</span>}</td>
+                  <ServiceCols p={p} prefix="Mnt" has={p.hasMnt} type={p.mntType} min={p.mntMin} max={p.mntMax} onChange={patch => updateProduct(p.id, patch)} />
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {/* ── 5. Additional Configuration ── */}
+      <Card style={{ marginTop: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
+          <SectionHdr title="Additional Configuration and Customization" color={COLORS.gold} badge="One-Time" />
+          <button onClick={addConfig} style={{ padding: "8px 16px", background: COLORS.primary, color: COLORS.white, border: "none", borderRadius: 8, cursor: "pointer", fontSize: 12, fontWeight: 700, flexShrink: 0 }}>+ Add Item</button>
+        </div>
+        {descField("addl", "Describe any custom development, configuration, or tailoring included in this section…")}
+        <div style={{ overflowX: "auto", borderRadius: 8, border: `1px solid ${COLORS.border}` }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Description</th>
+                <th style={{ ...thStyle, width: 120 }}>Type</th>
+                <th style={{ ...thStyle, textAlign: "right", width: 130 }}>Min Amount</th>
+                <th style={{ ...thStyle, textAlign: "right", width: 130 }}>Max Amount</th>
+                <th style={{ ...thStyle, width: 40 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {addlConfigs.map((c, i) => (
+                <tr key={c.id}>
+                  <td style={tdStyle(i % 2)}><Input value={c.name} onChange={v => updateConfig(c.id, { name: v })} placeholder="Enter description…" /></td>
+                  <td style={tdStyle(i % 2)}>
+                    <Select value={c.type} onChange={v => updateConfig(c.id, { type: v })} options={FEE_TYPES} />
+                  </td>
+                  <td style={tdStyle(i % 2)}>
+                    <Input type="number" value={c.minVal} onChange={v => updateConfig(c.id, { minVal: v })} style={{ textAlign: "right" }} />
+                  </td>
+                  <td style={tdStyle(i % 2)}>
+                    {c.type === "Fixed"
+                      ? <span style={{ fontSize: 11, color: COLORS.muted, paddingLeft: 8 }}>= Min</span>
+                      : <Input type="number" value={c.maxVal} onChange={v => updateConfig(c.id, { maxVal: v })} style={{ textAlign: "right" }} />}
+                  </td>
+                  <td style={tdStyle(i % 2)}>
+                    <button onClick={() => removeConfig(c.id)} style={{ background: "none", border: "none", color: COLORS.red, cursor: "pointer", fontSize: 16, padding: 4, opacity: 0.5 }}>×</button>
+                  </td>
+                </tr>
+              ))}
+              {addlConfigs.length === 0 && (
+                <tr><td colSpan={5} style={{ ...tdStyle(0), textAlign: "center", color: COLORS.muted, fontStyle: "italic" }}>No items added yet</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+const fmtRange = (min, max) => {
+  if (!min && !max) return "—";
+  if (min === max) return fmt(min);
+  return `${fmt(min)} – ${fmt(max)}`;
+};
+
+function ProposalPage({ settings, products, addlConfigs, minTotals, maxTotals, sectionDescs }) {
+  const currency = settings.currency || "JOD";
+
+  const feeHdrStyle = { ...thStyle, textAlign: "right", minWidth: 200, whiteSpace: "normal" };
+
+  // Single "Indicative Fee" cell showing range
+  const feeCell = (min, max, alt) => (
+    <td style={{ ...tdCalc(alt), textAlign: "right", minWidth: 200 }}>
+      {(!min && !max) ? <span style={{ color: COLORS.muted }}>—</span> : (min === max)
+        ? <span style={{ color: COLORS.green, fontWeight: 700 }}>{fmt(min)}</span>
+        : <span>
+            <span style={{ color: COLORS.green, fontWeight: 700 }}>{fmt(min)}</span>
+            <span style={{ color: COLORS.muted, margin: "0 6px", fontWeight: 400 }}>–</span>
+            <span style={{ color: COLORS.red, fontWeight: 700 }}>{fmt(max)}</span>
+          </span>
+      }
+    </td>
+  );
+
+  // ── Compute rows ────────────────────────────────────────────────────────────
+  const licRows = products.filter(p => p.name).map(p => {
+    const cp = calcProduct(p, settings.users);
+    return { name: p.name, min: cp.license, max: cp.license };
+  });
+  const licTotalMin = licRows.reduce((s, r) => s + r.min, 0);
+  const licTotalMax = licRows.reduce((s, r) => s + r.max, 0);
+
+  const migRows = products.filter(p => p.name && p.hasMig).map(p => {
+    const cp = calcProduct(p, settings.users);
+    return { name: p.name, min: cp.migMinCalc, max: cp.migMaxCalc };
+  });
+  const migTotalMin = migRows.reduce((s, r) => s + r.min, 0);
+  const migTotalMax = migRows.reduce((s, r) => s + r.max, 0);
+
+  const depRows = products.filter(p => p.name && p.hasDep).map(p => {
+    const cp = calcProduct(p, settings.users);
+    return { name: p.name, min: cp.depMinCalc, max: cp.depMaxCalc };
+  });
+  const depTotalMin = depRows.reduce((s, r) => s + r.min, 0);
+  const depTotalMax = depRows.reduce((s, r) => s + r.max, 0);
+
+  const mntRows = products.filter(p => p.name && p.hasMnt).map(p => {
+    const cp = calcProduct(p, settings.users);
+    return { name: p.name, min: cp.mntMinCalc, max: cp.mntMaxCalc };
+  });
+  const mntTotalMin = mntRows.reduce((s, r) => s + r.min, 0);
+  const mntTotalMax = mntRows.reduce((s, r) => s + r.max, 0);
+
+  const addlRows = addlConfigs.filter(c => c.name);
+  const addlTotalMin = addlRows.reduce((s, c) => s + (c.minVal || 0), 0);
+  const addlTotalMax = addlRows.reduce((s, c) => s + (c.type === "Fixed" ? c.minVal : c.maxVal || 0), 0);
+
+  const aggMin = licTotalMin + migTotalMin + depTotalMin + mntTotalMin + addlTotalMin;
+  const aggMax = licTotalMax + migTotalMax + depTotalMax + mntTotalMax + addlTotalMax;
+
+  // ── Excel Export ────────────────────────────────────────────────────────────
+  const exportExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const clientLabel = settings.client || "Financial Proposal";
+
+    const C = {
+      primary: "FF004A91", accent: "FF2678A5", green: "FF1A6B3C", amber: "FF8B5A00",
+      purple: "FF5B2C6F", gold: "FFD9B645", goldDark: "FF8B6914",
+      white: "FFFFFFFF", dark: "FF1B2038", muted: "FF7A8699",
+      calcBg: "FFEAF0F7", altRow: "FFF2F5F8",
+      minGreen: "FFD6EFE0", maxRed: "FFFDE8E8", numMin: "FF2E7D32", numMax: "FFC0392B",
+    };
+
+    const font  = (color = C.dark, bold = false, sz = 11) => ({ font: { name: "Calibri", sz, bold, color: { rgb: color } } });
+    const fill  = (fg) => ({ fill: { fgColor: { rgb: fg }, patternType: "solid" } });
+    const bord  = () => ({ border: { bottom: { style: "thin", color: { rgb: "FFD0D5DD" } } } });
+    const align = (h = "left") => ({ alignment: { horizontal: h, vertical: "center", wrapText: h === "left" } });
+    const nFmt  = () => ({ numFmt: '#,##0' });
+
+    const hdrCell  = (v, bg, fc = C.white) => ({ v, t: "s", s: { ...font(fc, true, 11), ...fill(bg), ...align("center"), border: { bottom: { style: "medium", color: { rgb: C.gold } } } } });
+    const lblCell  = (v, bold = false, bg = C.white) => ({ v, t: "s", s: { ...font(C.dark, bold), ...fill(bg), ...bord(), ...align("left") } });
+    const descCell = (v, bg = C.calcBg) => ({ v, t: "s", s: { ...font(C.muted, false, 10), ...fill(bg), ...align("left"), border: {} } });
+    const rangeCell = (min, max, bg = C.white, bgAlt = C.white) => {
+      const isRange = min !== max;
+      const display = (min === 0 && max === 0) ? "—" : isRange ? `${min.toLocaleString("en-US")} – ${max.toLocaleString("en-US")}` : min.toLocaleString("en-US");
+      return { v: display, t: "s", s: { ...font(isRange ? C.amber : C.numMin, true, 11), ...fill(bg), ...bord(), ...align("right") } };
+    };
+    const emptyCell = (bg = C.white) => ({ v: "", t: "s", s: { ...fill(bg), ...bord() } });
+    const titleCell = (v, bg) => ({ v, t: "s", s: { ...font(C.white, true, 13), ...fill(bg), ...align("left"), border: {} } });
+    const footerCell = (min, max, bg) => {
+      const isRange = min !== max;
+      const display = isRange ? `${min.toLocaleString("en-US")} – ${max.toLocaleString("en-US")}` : min.toLocaleString("en-US");
+      return { v: display, t: "s", s: { ...font(C.white, true, 12), ...fill(bg), ...align("right"), border: {} } };
+    };
+
+    const buildSheet = (title, accentColor, rows, totalMin, totalMax, desc) => {
+      const wsData = [];
+      // Title
+      wsData.push([titleCell(title, accentColor), emptyCell(accentColor)]);
+      // Client
+      wsData.push([{ v: `Client: ${clientLabel}   |   Currency: ${currency}`, t: "s", s: { ...font(C.muted, false, 10), ...fill(C.calcBg), ...align("left"), border: {} } }, emptyCell(C.calcBg)]);
+      // Description
+      if (desc) {
+        wsData.push([{ v: desc, t: "s", s: { ...font(C.dark, false, 10), ...fill(C.calcBg), ...align("left"), border: {}, alignment: { horizontal: "left", wrapText: true } } }, emptyCell(C.calcBg)]);
+      }
+      // Spacer
+      wsData.push([emptyCell(), emptyCell()]);
+      // Headers
+      wsData.push([hdrCell("Item", accentColor), hdrCell(`Indicative Fee (${currency})`, accentColor)]);
+      // Data rows
+      rows.forEach((r, i) => {
+        const bg = i % 2 ? C.altRow : C.white;
+        wsData.push([lblCell(r.name, false, bg), rangeCell(r.min, r.max, bg)]);
+      });
+      if (rows.length === 0) wsData.push([{ v: "No items configured", t: "s", s: { ...font(C.muted, false, 10), ...fill(C.white), ...align("center"), border: {} } }, emptyCell()]);
+      // Footer
+      wsData.push([{ v: "TOTAL", t: "s", s: { ...font(C.white, true, 12), ...fill(accentColor), ...align("left"), border: {} } }, footerCell(totalMin, totalMax, accentColor)]);
+
+      const ws = XLSX.utils.aoa_to_sheet(wsData);
+      const descOffset = desc ? 1 : 0;
+      ws["!merges"] = [
+        { s: { r: 0, c: 0 }, e: { r: 0, c: 1 } },
+        { s: { r: 1, c: 0 }, e: { r: 1, c: 1 } },
+        ...(desc ? [{ s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }] : []),
+        { s: { r: 3 + descOffset, c: 0 }, e: { r: 3 + descOffset, c: 1 } },
+      ];
+      ws["!cols"] = [{ wch: 50 }, { wch: 28 }];
+      ws["!rows"] = [{ hpt: 28 }, { hpt: 16 }, ...(desc ? [{ hpt: 40 }] : []), { hpt: 6 }, { hpt: 20 }];
+      return ws;
+    };
+
+    const buildAggSheet = () => {
+      const wsData = [];
+      wsData.push([titleCell("Aggregate Budget View", C.primary), emptyCell(C.primary), emptyCell(C.primary)]);
+      wsData.push([{ v: `Client: ${clientLabel}   |   Currency: ${currency}`, t: "s", s: { ...font(C.muted, false, 10), ...fill(C.calcBg), ...align("left"), border: {} } }, emptyCell(C.calcBg), emptyCell(C.calcBg)]);
+      wsData.push([emptyCell(), emptyCell(), emptyCell()]);
+      wsData.push([hdrCell("Category", C.primary), hdrCell("Type", C.primary), hdrCell(`Indicative Fee (${currency})`, C.primary)]);
+
+      const aggRows = [
+        { label: "Annual Solution Licenses", type: "Annual", color: C.accent, min: licTotalMin, max: licTotalMax },
+        { label: "Data Migration & Integration", type: "One-Time", color: C.green, min: migTotalMin, max: migTotalMax },
+        { label: "Deployment and Implementation", type: "One-Time", color: C.amber, min: depTotalMin, max: depTotalMax },
+        { label: "Upgrades, Maintenance & Support", type: "Annual", color: C.purple, min: mntTotalMin, max: mntTotalMax },
+        { label: "Additional Config. & Customization", type: "One-Time", color: C.goldDark, min: addlTotalMin, max: addlTotalMax },
+      ];
+
+      aggRows.forEach((r, i) => {
+        const bg = i % 2 ? C.altRow : C.white;
+        wsData.push([
+          lblCell(r.label, true, bg),
+          { v: r.type, t: "s", s: { ...font(r.type === "Annual" ? C.accent : C.amber, true, 10), ...fill(bg), ...bord(), ...align("center") } },
+          rangeCell(r.min, r.max, bg),
+        ]);
+      });
+      wsData.push([emptyCell(), emptyCell(), emptyCell()]);
+      wsData.push([
+        { v: "YEAR 1 TOTAL INVESTMENT", t: "s", s: { ...font(C.white, true, 13), ...fill(C.primary), ...align("left"), border: {} } },
+        emptyCell(C.primary),
+        footerCell(aggMin, aggMax, C.primary),
+      ]);
+      // Summary boxes
+      wsData.push([emptyCell(), emptyCell(), emptyCell()]);
+      wsData.push([{ v: "MINIMUM INVESTMENT — YEAR 1", t: "s", s: { ...font(C.numMin, true, 10), ...fill(C.minGreen), ...align("left"), border: {} } }, { v: aggMin, t: "n", s: { ...font(C.primary, true, 14), ...fill(C.minGreen), ...align("right"), ...nFmt(), border: {} } }, emptyCell(C.minGreen)]);
+      wsData.push([{ v: "MAXIMUM INVESTMENT — YEAR 1", t: "s", s: { ...font(C.numMax, true, 10), ...fill(C.maxRed), ...align("left"), border: {} } }, { v: aggMax, t: "n", s: { ...font(C.primary, true, 14), ...fill(C.maxRed), ...align("right"), ...nFmt(), border: {} } }, emptyCell(C.maxRed)]);
+
+      const ws = XLSX.utils.aoa_to_sheet(wsData);
+      ws["!merges"] = [
+        { s: { r: 0, c: 0 }, e: { r: 0, c: 2 } },
+        { s: { r: 1, c: 0 }, e: { r: 1, c: 2 } },
+        { s: { r: 2, c: 0 }, e: { r: 2, c: 2 } },
+        { s: { r: aggRows.length + 4, c: 0 }, e: { r: aggRows.length + 4, c: 1 } }, // total label
+        { s: { r: aggRows.length + 6, c: 1 }, e: { r: aggRows.length + 6, c: 2 } }, // min value
+        { s: { r: aggRows.length + 7, c: 1 }, e: { r: aggRows.length + 7, c: 2 } }, // max value
+      ];
+      ws["!cols"] = [{ wch: 46 }, { wch: 12 }, { wch: 28 }];
+      ws["!rows"] = [{ hpt: 28 }, { hpt: 16 }, { hpt: 6 }, { hpt: 20 }];
+      return ws;
+    };
+
+    XLSX.utils.book_append_sheet(wb, buildSheet("Annual Solution Licenses",        C.accent,   licRows,  licTotalMin,  licTotalMax,  sectionDescs.lic),  "Licenses");
+    XLSX.utils.book_append_sheet(wb, buildSheet("Data Migration & Integration",    C.green,    migRows,  migTotalMin,  migTotalMax,  sectionDescs.mig),  "Migration");
+    XLSX.utils.book_append_sheet(wb, buildSheet("Deployment & Implementation",     C.amber,    depRows,  depTotalMin,  depTotalMax,  sectionDescs.dep),  "Deployment");
+    XLSX.utils.book_append_sheet(wb, buildSheet("Upgrades, Maintenance & Support", C.purple,   mntRows,  mntTotalMin,  mntTotalMax,  sectionDescs.mnt),  "Maintenance");
+    XLSX.utils.book_append_sheet(wb, buildSheet("Additional Configuration",        C.goldDark, addlRows.map(c => ({ name: c.name, min: c.minVal || 0, max: c.type === "Fixed" ? c.minVal : c.maxVal || 0 })), addlTotalMin, addlTotalMax, sectionDescs.addl), "Add. Config");
+    XLSX.utils.book_append_sheet(wb, buildAggSheet(), "Aggregate");
+
+    XLSX.writeFile(wb, `${clientLabel.replace(/\s+/g, "_")}_Proposal.xlsx`);
+  };
+
+  // ── Print ───────────────────────────────────────────────────────────────────
+  const handlePrint = () => {
+    const fmtN = (n) => n == null ? "—" : n.toLocaleString("en-US");
+    const rangeStr = (min, max) => (min === 0 && max === 0) ? "—" : (min === max) ? fmtN(min) : `${fmtN(min)} – ${fmtN(max)}`;
+
+    const sectionHtml = (title, color, rows, totalMin, totalMax, desc) => `
+      <div class="section">
+        <div class="section-title" style="border-left:5px solid ${color}">${title}</div>
+        ${desc ? `<div class="desc">${desc}</div>` : ""}
+        <table>
+          <thead><tr><th>Item</th><th style="text-align:right">Indicative Fee (${currency})</th></tr></thead>
+          <tbody>
+            ${rows.length ? rows.map((r,i) => `<tr class="${i%2?'alt':''}"><td>${r.name}</td><td class="num">${rangeStr(r.min, r.max)}</td></tr>`).join('') : `<tr><td colspan="2" class="empty">No items</td></tr>`}
+          </tbody>
+          <tfoot><tr><td><strong>TOTAL</strong></td><td class="num"><strong>${rangeStr(totalMin, totalMax)}</strong></td></tr></tfoot>
+        </table>
+      </div>`;
+
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+      <title>${settings.client || "Financial Proposal"}</title>
+      <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: Arial, sans-serif; font-size: 11px; color: #1B2038; padding: 24px; }
+        .header { background: #004A91; color: white; padding: 16px 20px; border-radius: 8px; margin-bottom: 20px; display:flex; justify-content:space-between; align-items:center; }
+        .header h1 { font-size: 16px; }
+        .header .sub { font-size: 11px; opacity: 0.8; }
+        .section { margin-bottom: 18px; break-inside: avoid; }
+        .section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #004A91; padding: 8px 12px; margin-bottom: 0; background: #EAF0F7; border-radius: 6px 6px 0 0; }
+        .desc { font-size: 11px; color: #555; background: #F7F9FB; padding: 7px 12px; border-left: 1px solid #D0D5DD; border-right: 1px solid #D0D5DD; font-style: italic; }
+        table { width: 100%; border-collapse: collapse; border: 1px solid #D0D5DD; overflow:hidden; }
+        th { background: #004A91; color: white; padding: 7px 10px; font-size: 10px; text-align: left; }
+        td { padding: 6px 10px; font-size: 11px; border-bottom: 1px solid #E8ECF0; }
+        tr.alt td { background: #F2F5F8; }
+        tfoot td { background: #004A91; color: white; font-weight: 700; padding: 8px 10px; }
+        .num { text-align: right; font-family: monospace; }
+        .empty { text-align: center; color: #7A8699; font-style: italic; }
+        .aggregate-table th:nth-child(2) { width: 80px; }
+        .totals { display: flex; gap: 16px; margin-top: 16px; }
+        .total-box { flex: 1; border-radius: 8px; padding: 14px 16px; }
+        .total-box.min { background: #EAF7EF; border-left: 4px solid #2E7D32; }
+        .total-box.max { background: #FFF5F5; border-left: 4px solid #C0392B; }
+        .total-box .label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+        .total-box .label.min { color: #2E7D32; }
+        .total-box .label.max { color: #C0392B; }
+        .total-box .amount { font-size: 22px; font-weight: 700; color: #004A91; }
+        @media print { body { padding: 0; } }
+      </style></head><body>
+      <div class="header">
+        <div><div class="sub">FINANCIAL PROPOSAL FOR</div><h1>${settings.client || "Financial Proposal"}</h1></div>
+        <div style="text-align:right"><div class="sub">Contract Duration</div><div style="font-size:14px;font-weight:700">${settings.duration} Year${settings.duration > 1 ? 's' : ''}</div></div>
+      </div>
+      ${sectionHtml("Annual Solution Licenses", "#2678A5", licRows, licTotalMin, licTotalMax, sectionDescs.lic)}
+      ${sectionHtml("Data Migration & Integration", "#1A6B3C", migRows, migTotalMin, migTotalMax, sectionDescs.mig)}
+      ${sectionHtml("Deployment and Implementation", "#8B5A00", depRows, depTotalMin, depTotalMax, sectionDescs.dep)}
+      ${sectionHtml("Upgrades, Maintenance, and Support", "#5B2C6F", mntRows, mntTotalMin, mntTotalMax, sectionDescs.mnt)}
+      ${sectionHtml("Additional Configuration and Customization", "#D9B645", addlRows.map(c => ({ name: c.name, min: c.minVal||0, max: c.type==="Fixed" ? c.minVal : c.maxVal||0 })), addlTotalMin, addlTotalMax, sectionDescs.addl)}
+      <div class="section">
+        <div class="section-title" style="border-left:5px solid #004A91">Aggregate Budget View</div>
+        <table class="aggregate-table">
+          <thead><tr><th>Category</th><th>Type</th><th style="text-align:right">Indicative Fee (${currency})</th></tr></thead>
+          <tbody>
+            ${[
+              ["Annual Solution Licenses","Annual",licTotalMin,licTotalMax],
+              ["Data Migration & Integration","One-Time",migTotalMin,migTotalMax],
+              ["Deployment and Implementation","One-Time",depTotalMin,depTotalMax],
+              ["Upgrades, Maintenance & Support","Annual",mntTotalMin,mntTotalMax],
+              ["Additional Configuration & Customization","One-Time",addlTotalMin,addlTotalMax],
+            ].map(([lbl,type,mn,mx],i) => `<tr class="${i%2?'alt':''}"><td>${lbl}</td><td>${type}</td><td class="num">${rangeStr(mn,mx)}</td></tr>`).join('')}
+          </tbody>
+          <tfoot><tr><td colspan="2"><strong>YEAR 1 TOTAL INVESTMENT</strong></td><td class="num"><strong>${rangeStr(aggMin, aggMax)}</strong></td></tr></tfoot>
+        </table>
+        <div class="totals">
+          <div class="total-box min"><div class="label min">MINIMUM INVESTMENT — YEAR 1</div><div class="amount">${fmtN(aggMin)} <span style="font-size:11px;color:#7A8699">${currency}</span></div></div>
+          <div class="total-box max"><div class="label max">MAXIMUM INVESTMENT — YEAR 1</div><div class="amount">${fmtN(aggMax)} <span style="font-size:11px;color:#7A8699">${currency}</span></div></div>
+        </div>
+      </div>
+    </body></html>`;
+
+    const w = window.open("", "_blank");
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => { w.print(); }, 400);
+  };
+
+  // ── SectionCard component ───────────────────────────────────────────────────
+  const SectionCard = ({ title, color, rows, totalMin, totalMax, emptyMsg, descKey, children }) => (
+    <Card style={{ marginBottom: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: sectionDescs[descKey] ? 8 : 16 }}>
+        <div style={{ width: 5, height: 28, borderRadius: 3, background: color }} />
+        <SectionTitle style={{ marginBottom: 0 }}>{title}</SectionTitle>
+      </div>
+      {sectionDescs[descKey] && (
+        <div style={{ fontSize: 12, color: COLORS.muted, fontStyle: "italic", marginBottom: 14, paddingLeft: 15, borderLeft: `3px solid ${color}40` }}>
+          {sectionDescs[descKey]}
+        </div>
+      )}
+      <div style={{ overflowX: "auto", borderRadius: 8, border: `1px solid ${COLORS.border}` }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Item</th>
+              <th style={{ ...feeHdrStyle, background: color }}>
+                Indicative Fee
+                <span style={{ fontSize: 9, display: "block", opacity: 0.7, fontWeight: 400 }}>{currency}</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {children || rows.map((r, i) => (
+              <tr key={i}>
+                <td style={tdStyle(i % 2)}>{r.name}</td>
+                {feeCell(r.min, r.max, i % 2)}
+              </tr>
+            ))}
+            {rows && rows.length === 0 && (
+              <tr><td colSpan={2} style={{ ...tdStyle(0), textAlign: "center", color: COLORS.muted, fontStyle: "italic" }}>{emptyMsg || "No items"}</td></tr>
+            )}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td style={{ padding: "10px 12px", fontWeight: 700, color: COLORS.white, background: color || COLORS.primary }}>TOTAL</td>
+              <td style={{ padding: "10px 12px", fontWeight: 700, color: COLORS.white, background: color || COLORS.primary, textAlign: "right", fontFamily: "monospace", fontSize: 14 }}>
+                {totalMin === totalMax
+                  ? <span style={{ color: "#b3ffd9" }}>{fmt(totalMin)}</span>
+                  : <><span style={{ color: "#b3ffd9" }}>{fmt(totalMin)}</span><span style={{ margin: "0 8px", opacity: 0.7 }}>–</span><span style={{ color: "#ffcccc" }}>{fmt(totalMax)}</span></>
+                }
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </Card>
+  );
+
+  return (
+    <div>
+      {/* Export / Print toolbar */}
+      <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginBottom: 16 }}>
+        <button onClick={handlePrint}
+          style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 18px", background: COLORS.primary, color: COLORS.white, border: "none", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 700 }}>
+          🖨 Print / Save PDF
+        </button>
+        <button onClick={exportExcel}
+          style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 18px", background: "#1A6B3C", color: COLORS.white, border: "none", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 700 }}>
+          📊 Download Excel
+        </button>
+      </div>
+
+      {settings.client && (
+        <div style={{ background: COLORS.primary, color: COLORS.white, borderRadius: 12, padding: "16px 24px", marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 2 }}>FINANCIAL PROPOSAL FOR</div>
+            <div style={{ fontSize: 20, fontWeight: 700 }}>{settings.client}</div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 11, opacity: 0.7 }}>Contract Duration</div>
+            <div style={{ fontSize: 16, fontWeight: 700 }}>{settings.duration} Year{settings.duration > 1 ? "s" : ""}</div>
+          </div>
+        </div>
+      )}
+
+      <SectionCard title="Annual Solution Licenses"        color={COLORS.accent} rows={licRows}  totalMin={licTotalMin}  totalMax={licTotalMax}  descKey="lic"  emptyMsg="No products configured" />
+      <SectionCard title="Data Migration & Integration"    color="#1A6B3C"        rows={migRows}  totalMin={migTotalMin}  totalMax={migTotalMax}  descKey="mig"  emptyMsg="No migration costs configured" />
+      <SectionCard title="Deployment and Implementation"   color="#8B5A00"        rows={depRows}  totalMin={depTotalMin}  totalMax={depTotalMax}  descKey="dep"  emptyMsg="No deployment costs configured" />
+      <SectionCard title="Upgrades, Maintenance, and Support" color="#5B2C6F"     rows={mntRows}  totalMin={mntTotalMin}  totalMax={mntTotalMax}  descKey="mnt"  emptyMsg="No maintenance costs configured" />
+
+      {/* Additional Configuration */}
+      <Card style={{ marginBottom: 20 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: sectionDescs.addl ? 8 : 16 }}>
+          <div style={{ width: 5, height: 28, borderRadius: 3, background: COLORS.gold }} />
+          <SectionTitle style={{ marginBottom: 0 }}>Additional Configuration and Customization</SectionTitle>
+        </div>
+        {sectionDescs.addl && (
+          <div style={{ fontSize: 12, color: COLORS.muted, fontStyle: "italic", marginBottom: 14, paddingLeft: 15, borderLeft: `3px solid ${COLORS.gold}60` }}>
+            {sectionDescs.addl}
+          </div>
+        )}
+        <div style={{ overflowX: "auto", borderRadius: 8, border: `1px solid ${COLORS.border}` }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Description</th>
+                <th style={{ ...feeHdrStyle, background: COLORS.gold, color: COLORS.dark }}>
+                  Indicative Fee
+                  <span style={{ fontSize: 9, display: "block", opacity: 0.6, fontWeight: 400 }}>{currency}</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {addlRows.map((c, i) => (
+                <tr key={c.id}>
+                  <td style={tdStyle(i % 2)}>{c.name}</td>
+                  {feeCell(c.minVal || 0, c.type === "Fixed" ? c.minVal || 0 : c.maxVal || 0, i % 2)}
+                </tr>
+              ))}
+              {addlRows.length === 0 && (
+                <tr><td colSpan={2} style={{ ...tdStyle(0), textAlign: "center", color: COLORS.muted, fontStyle: "italic" }}>No additional configuration items added</td></tr>
+              )}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td style={{ padding: "10px 12px", fontWeight: 700, color: COLORS.dark, background: COLORS.gold }}>TOTAL</td>
+                <td style={{ padding: "10px 12px", fontWeight: 700, color: COLORS.dark, background: COLORS.gold, textAlign: "right", fontFamily: "monospace", fontSize: 14 }}>
+                  {addlTotalMin === addlTotalMax
+                    ? <span style={{ color: "#1a5c2a" }}>{fmt(addlTotalMin)}</span>
+                    : <><span style={{ color: "#1a5c2a" }}>{fmt(addlTotalMin)}</span><span style={{ margin: "0 8px", opacity: 0.6 }}>–</span><span style={{ color: COLORS.red }}>{fmt(addlTotalMax)}</span></>
+                  }
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </Card>
+
+      {/* Aggregate Budget View */}
+      <Card>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+          <div style={{ width: 5, height: 28, borderRadius: 3, background: COLORS.primary }} />
+          <SectionTitle style={{ marginBottom: 0 }}>Aggregate Budget View</SectionTitle>
+        </div>
+        <div style={{ overflowX: "auto", borderRadius: 8, border: `1px solid ${COLORS.border}`, marginBottom: 20 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Category</th>
+                <th style={{ ...thStyle, textAlign: "center", width: 80 }}>Type</th>
+                <th style={{ ...feeHdrStyle }}>
+                  Indicative Fee
+                  <span style={{ fontSize: 9, display: "block", opacity: 0.7, fontWeight: 400 }}>{currency}</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                { label: "Annual Solution Licenses", type: "Annual", min: licTotalMin, max: licTotalMax, color: COLORS.accent },
+                { label: "Data Migration & Integration", type: "One-Time", min: migTotalMin, max: migTotalMax, color: "#1A6B3C" },
+                { label: "Deployment and Implementation", type: "One-Time", min: depTotalMin, max: depTotalMax, color: "#8B5A00" },
+                { label: "Upgrades, Maintenance & Support", type: "Annual", min: mntTotalMin, max: mntTotalMax, color: "#5B2C6F" },
+                { label: "Additional Configuration & Customization", type: "One-Time", min: addlTotalMin, max: addlTotalMax, color: COLORS.gold },
+              ].map((row, i) => (
+                <tr key={row.label}>
+                  <td style={tdStyle(i % 2)}>
+                    <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: row.color, marginRight: 8 }} />
+                    <strong>{row.label}</strong>
+                  </td>
+                  <td style={{ ...tdStyle(i % 2), textAlign: "center" }}>
+                    <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 10, background: row.type === "Annual" ? "#EAF4FF" : "#FFF5E0", color: row.type === "Annual" ? COLORS.accent : "#8B5A00", fontWeight: 700 }}>{row.type}</span>
+                  </td>
+                  {feeCell(row.min, row.max, i % 2)}
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={2} style={{ padding: "12px 14px", fontWeight: 700, color: COLORS.white, background: COLORS.primary, fontSize: 13 }}>YEAR 1 TOTAL INVESTMENT</td>
+                <td style={{ padding: "12px 14px", fontWeight: 700, color: COLORS.white, background: COLORS.primary, textAlign: "right", fontFamily: "monospace", fontSize: 15 }}>
+                  {aggMin === aggMax
+                    ? <span style={{ color: "#b3ffd9" }}>{fmt(aggMin)}</span>
+                    : <><span style={{ color: "#b3ffd9" }}>{fmt(aggMin)}</span><span style={{ margin: "0 8px", opacity: 0.7 }}>–</span><span style={{ color: "#ffcccc" }}>{fmt(aggMax)}</span></>
+                  }
+                  <span style={{ fontSize: 10, display: "block", opacity: 0.7 }}>{currency}</span>
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <div style={{ background: COLORS.calcBg, borderRadius: 10, padding: 20, borderLeft: `4px solid ${COLORS.green}` }}>
+            <div style={{ fontSize: 11, color: COLORS.green, fontWeight: 700, marginBottom: 6 }}>MINIMUM INVESTMENT — YEAR 1</div>
+            <div style={{ fontSize: 28, fontWeight: 700, color: COLORS.primary }}>{fmt(aggMin)}</div>
+            <div style={{ fontSize: 11, color: COLORS.muted, marginTop: 4 }}>{currency}</div>
+          </div>
+          <div style={{ background: "#FFF5F5", borderRadius: 10, padding: 20, borderLeft: `4px solid ${COLORS.red}` }}>
+            <div style={{ fontSize: 11, color: COLORS.red, fontWeight: 700, marginBottom: 6 }}>MAXIMUM INVESTMENT — YEAR 1</div>
+            <div style={{ fontSize: 28, fontWeight: 700, color: COLORS.primary }}>{fmt(aggMax)}</div>
+            <div style={{ fontSize: 11, color: COLORS.muted, marginTop: 4 }}>{currency}</div>
+          </div>
+        </div>
+        {aggMin !== aggMax && (
+          <div style={{ marginTop: 12, textAlign: "center", fontSize: 12, color: COLORS.muted }}>
+            Budget range variance: <strong style={{ color: COLORS.gold }}>{fmt(aggMax - aggMin)} {currency}</strong>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function AggregatePage({ minTotals, maxTotals }) {
+  const cats = [
+    { label: "Solution Licenses",   annMin: minTotals.license, annMax: maxTotals.license, otMin: 0,               otMax: 0 },
+    { label: "Data Migration",      annMin: 0,                 annMax: 0,                 otMin: minTotals.mig,   otMax: maxTotals.mig },
+    { label: "Deployment",          annMin: 0,                 annMax: 0,                 otMin: minTotals.dep,   otMax: maxTotals.dep },
+    { label: "Maintenance & Upgrade", annMin: minTotals.mnt,  annMax: maxTotals.mnt,     otMin: 0,               otMax: 0 },
+  ];
+  const totAnnMin = cats.reduce((s, c) => s + c.annMin, 0);
+  const totAnnMax = cats.reduce((s, c) => s + c.annMax, 0);
+  const totOtMin  = cats.reduce((s, c) => s + c.otMin,  0);
+  const totOtMax  = cats.reduce((s, c) => s + c.otMax,  0);
+
+  const rangeCell = (min, max, alt) => {
+    const isRange = min !== max;
+    return (
+      <td style={{ ...tdCalc(alt), textAlign: "right" }}>
+        {(!min && !max) ? <span style={{ color: COLORS.muted }}>—</span> : isRange
+          ? <span>
+              <span style={{ color: COLORS.green, fontWeight: 700 }}>{fmt(min)}</span>
+              <span style={{ color: COLORS.muted, margin: "0 5px" }}>–</span>
+              <span style={{ color: COLORS.red, fontWeight: 700 }}>{fmt(max)}</span>
+            </span>
+          : <span style={{ color: COLORS.green, fontWeight: 700 }}>{fmt(min)}</span>
+        }
+      </td>
+    );
+  };
+
+  const footerRange = (min, max) => {
+    const isRange = min !== max;
+    return (
+      <td style={{ padding: "10px 12px", fontWeight: 700, color: COLORS.white, background: COLORS.primary, textAlign: "right", fontFamily: "monospace" }}>
+        {isRange
+          ? <><span style={{ color: "#b3ffd9" }}>{fmt(min)}</span><span style={{ margin: "0 6px", opacity: 0.6 }}>–</span><span style={{ color: "#ffcccc" }}>{fmt(max)}</span></>
+          : <span style={{ color: "#b3ffd9" }}>{fmt(min)}</span>
+        }
+      </td>
+    );
+  };
+
+  return (
+    <Card>
+      <SectionTitle>Aggregate Budget View</SectionTitle>
+      <div style={{ overflowX: "auto", borderRadius: 8, border: `1px solid ${COLORS.border}`, marginBottom: 24 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>
+            <th style={thStyle}>Category</th>
+            <th style={{ ...thStyle, textAlign: "right", minWidth: 180 }}>Annual Fee</th>
+            <th style={{ ...thStyle, textAlign: "right", minWidth: 180 }}>One-Time Fee</th>
+            <th style={{ ...thStyle, textAlign: "right", background: COLORS.gold, color: COLORS.dark, minWidth: 80 }}>Variance</th>
+          </tr></thead>
+          <tbody>
+            {cats.map((c, i) => {
+              const variance = (c.annMax + c.otMax) - (c.annMin + c.otMin);
+              return (
+                <tr key={c.label}>
+                  <td style={tdStyle(i % 2)}><strong>{c.label}</strong></td>
+                  {rangeCell(c.annMin, c.annMax, i % 2)}
+                  {rangeCell(c.otMin,  c.otMax,  i % 2)}
+                  <td style={{ ...tdCalc(i % 2), textAlign: "right", color: variance > 0 ? COLORS.red : COLORS.green, fontWeight: 700 }}>{variance ? fmt(variance) : "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot><tr>
+            <td style={{ padding: "10px 12px", fontWeight: 700, color: COLORS.white, background: COLORS.primary }}>TOTAL</td>
+            {footerRange(totAnnMin, totAnnMax)}
+            {footerRange(totOtMin,  totOtMax)}
+            <td style={{ padding: "10px 12px", fontWeight: 700, color: COLORS.gold, background: COLORS.primary, textAlign: "right", fontFamily: "monospace" }}>
+              {fmt((totAnnMax + totOtMax) - (totAnnMin + totOtMin))}
+            </td>
+          </tr></tfoot>
+        </table>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+        <div style={{ background: COLORS.calcBg, borderRadius: 10, padding: 20 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.green, marginBottom: 8 }}>MIN CASE — YEAR 1</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: COLORS.primary }}>{fmt(minTotals.total)}</div>
+          <div style={{ fontSize: 11, color: COLORS.muted, marginTop: 4 }}>Recurring: {fmt(minTotals.license + minTotals.mnt)} | One-Time: {fmt(minTotals.mig + minTotals.dep)}</div>
+        </div>
+        <div style={{ background: "#FFF5F5", borderRadius: 10, padding: 20 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.red, marginBottom: 8 }}>MAX CASE — YEAR 1</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: COLORS.primary }}>{fmt(maxTotals.total)}</div>
+          <div style={{ fontSize: 11, color: COLORS.muted, marginTop: 4 }}>Recurring: {fmt(maxTotals.license + maxTotals.mnt)} | One-Time: {fmt(maxTotals.mig + maxTotals.dep)}</div>
+        </div>
+      </div>
+      <div style={{ marginTop: 24 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.muted, marginBottom: 8 }}>CATEGORY COMPARISON</div>
+        <MiniBar data={[cats.map(c => c.annMin + c.otMin), cats.map(c => c.annMax + c.otMax)]} colors={[COLORS.accent, COLORS.gold]} labels={cats.map(c => c.label)} height={180} />
+        <div style={{ display: "flex", gap: 16, justifyContent: "center", marginTop: 4 }}>
+          <span style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 12, height: 12, borderRadius: 2, background: COLORS.accent, display: "inline-block" }} /> Min</span>
+          <span style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 12, height: 12, borderRadius: 2, background: COLORS.gold, display: "inline-block" }} /> Max</span>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function DashboardPage({ settings, products, minTotals, maxTotals }) {
+  const esc = settings.escalation;
+  const years = [1, 2, 3, 4, 5];
+  const projection = (totals) => years.map(y => {
+    const lic = totals.license * Math.pow(1 + esc, y - 1);
+    const mnt = totals.mnt * Math.pow(1 + esc, y - 1);
+    const ot = y === 1 ? totals.mig + totals.dep : 0;
+    return { lic, mnt, ot, total: lic + mnt + ot };
+  });
+  const minProj = projection(minTotals);
+  const maxProj = projection(maxTotals);
+  const cumMin = minProj.reduce((a, p) => { a.push((a.length ? a[a.length-1] : 0) + p.total); return a; }, []);
+  const cumMax = maxProj.reduce((a, p) => { a.push((a.length ? a[a.length-1] : 0) + p.total); return a; }, []);
+  const dur = Math.min(Math.max(settings.duration, 1), 5);
+  const minTCO = cumMin[dur - 1] || 0;
+  const maxTCO = cumMax[dur - 1] || 0;
+  const minAnn = minTotals.license + minTotals.mnt;
+  const maxAnn = maxTotals.license + maxTotals.mnt;
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+        <KPI label="Products" value={products.filter(p => p.name).length} color={COLORS.primary} />
+        <KPI label="Licensed Users" value={settings.users} color={COLORS.accent} />
+        <KPI label="Contract" value={`${settings.duration} Years`} color={COLORS.gold} />
+        <KPI label="Min Case Y1" value={fmt(minTotals.total)} color={COLORS.green} />
+        <KPI label="Max Case Y1" value={fmt(maxTotals.total)} color={COLORS.red} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 20 }}>
+        <Card>
+          <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.primary, marginBottom: 12 }}>Year 1 — Min vs Max</div>
+          <MiniBar data={[[minTotals.license, minTotals.mig, minTotals.dep, minTotals.mnt], [maxTotals.license, maxTotals.mig, maxTotals.dep, maxTotals.mnt]]} colors={[COLORS.accent, COLORS.gold]} labels={["Licenses", "Migration", "Deployment", "Maint."]} />
+          <div style={{ display: "flex", gap: 12, justifyContent: "center", fontSize: 10 }}>
+            <span><span style={{ display: "inline-block", width: 10, height: 10, background: COLORS.accent, borderRadius: 2, marginRight: 4 }} />Min</span>
+            <span><span style={{ display: "inline-block", width: 10, height: 10, background: COLORS.gold, borderRadius: 2, marginRight: 4 }} />Max</span>
+          </div>
+        </Card>
+        <Card>
+          <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.primary, marginBottom: 12 }}>Year 1 Composition (Min)</div>
+          <PieChart slices={[
+            { label: "Licenses", value: minTotals.license, color: COLORS.accent },
+            { label: "Migration", value: minTotals.mig, color: COLORS.light },
+            { label: "Deployment", value: minTotals.dep, color: COLORS.gold },
+            { label: "Maintenance", value: minTotals.mnt, color: COLORS.primary },
+          ]} />
+        </Card>
+      </div>
+      <Card style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.primary, marginBottom: 12 }}>Multi-Year Projection</div>
+        <div style={{ overflowX: "auto", borderRadius: 8, border: `1px solid ${COLORS.border}` }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr><th style={thStyle}></th>{years.map(y => <th key={y} style={{ ...thStyle, textAlign: "right" }}>Year {y}</th>)}</tr></thead>
+            <tbody>
+              {[
+                { label: "Min — Licenses", data: minProj.map(p => p.lic) },
+                { label: "Min — Maintenance", data: minProj.map(p => p.mnt) },
+                { label: "Min — One-Time", data: minProj.map(p => p.ot) },
+                { label: "Min — Total", data: minProj.map(p => p.total), bold: true },
+                { label: "Max — Licenses", data: maxProj.map(p => p.lic) },
+                { label: "Max — Maintenance", data: maxProj.map(p => p.mnt) },
+                { label: "Max — One-Time", data: maxProj.map(p => p.ot) },
+                { label: "Max — Total", data: maxProj.map(p => p.total), bold: true },
+              ].map((row, i) => (
+                <tr key={row.label}>
+                  <td style={row.bold ? { padding: "8px 12px", fontWeight: 700, color: COLORS.white, background: COLORS.primary } : tdStyle(i % 2)}>{row.label}</td>
+                  {row.data.map((v, j) => <td key={j} style={{ ...(row.bold ? { padding: "8px 12px", fontWeight: 700, color: COLORS.white, background: COLORS.primary, fontFamily: "monospace" } : tdCalc(i % 2)), textAlign: "right" }}>{v ? fmt(v) : "—"}</td>)}
+                </tr>
+              ))}
+              <tr><td style={{ padding: "8px 12px", fontWeight: 700, color: COLORS.green, background: COLORS.calcBg }}>Min — Cumulative</td>{cumMin.map((v, i) => <td key={i} style={{ padding: "8px 12px", fontWeight: 700, color: COLORS.green, background: COLORS.calcBg, textAlign: "right", fontFamily: "monospace" }}>{fmt(v)}</td>)}</tr>
+              <tr><td style={{ padding: "8px 12px", fontWeight: 700, color: COLORS.red, background: "#FFF5F5" }}>Max — Cumulative</td>{cumMax.map((v, i) => <td key={i} style={{ padding: "8px 12px", fontWeight: 700, color: COLORS.red, background: "#FFF5F5", textAlign: "right", fontFamily: "monospace" }}>{fmt(v)}</td>)}</tr>
+            </tbody>
+          </table>
+        </div>
+      </Card>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <Card>
+          <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.primary, marginBottom: 12 }}>Cumulative TCO</div>
+          <MiniBar data={[cumMin, cumMax]} colors={[COLORS.accent, COLORS.gold]} labels={years.map(y => `Year ${y}`)} height={160} />
+          <div style={{ display: "flex", gap: 12, justifyContent: "center", fontSize: 10 }}>
+            <span><span style={{ display: "inline-block", width: 10, height: 10, background: COLORS.accent, borderRadius: 2, marginRight: 4 }} />Min</span>
+            <span><span style={{ display: "inline-block", width: 10, height: 10, background: COLORS.gold, borderRadius: 2, marginRight: 4 }} />Max</span>
+          </div>
+        </Card>
+        <Card>
+          <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.primary, marginBottom: 16 }}>Total Cost of Ownership ({settings.duration}yr)</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ background: COLORS.calcBg, borderRadius: 10, padding: 16, borderLeft: `4px solid ${COLORS.green}` }}>
+              <div style={{ fontSize: 10, color: COLORS.green, fontWeight: 700 }}>MIN CASE TCO</div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: COLORS.primary }}>{fmt(minTCO)}</div>
+            </div>
+            <div style={{ background: "#FFF5F5", borderRadius: 10, padding: 16, borderLeft: `4px solid ${COLORS.red}` }}>
+              <div style={{ fontSize: 10, color: COLORS.red, fontWeight: 700 }}>MAX CASE TCO</div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: COLORS.primary }}>{fmt(maxTCO)}</div>
+            </div>
+            <div style={{ fontSize: 12, color: COLORS.muted, textAlign: "center" }}>
+              Variance: <strong style={{ color: COLORS.gold }}>{fmt(maxTCO - minTCO)}</strong> | Per-user/yr: <strong>{fmt(minAnn / (settings.users || 1))}</strong> – <strong>{fmt(maxAnn / (settings.users || 1))}</strong>
+            </div>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [page, setPage] = useState("settings");
+  const [settings, setSettings] = useState({ client: "", users: 25, currency: "JOD", duration: 3, escalation: 0.05 });
+  const [products, setProducts] = useState(DEFAULT_PRODUCTS);
+  const [addlConfigs, setAddlConfigs] = useState(DEFAULT_ADDL_CONFIGS);
+  const [sectionDescs, setSectionDescs] = useState({ lic: "", mig: "", dep: "", mnt: "", addl: "" });
+
+  const calcsData = useMemo(() => {
+    const minCalcs = products.map(p => { const cp = calcProduct(p, settings.users); return { id: p.id, name: p.name, license: cp.license, mig: cp.migMinCalc, dep: cp.depMinCalc, mnt: cp.mntMinCalc, total: cp.license + cp.migMinCalc + cp.depMinCalc + cp.mntMinCalc }; });
+    const maxCalcs = products.map(p => { const cp = calcProduct(p, settings.users); return { id: p.id, name: p.name, license: cp.license, mig: cp.migMaxCalc, dep: cp.depMaxCalc, mnt: cp.mntMaxCalc, total: cp.license + cp.migMaxCalc + cp.depMaxCalc + cp.mntMaxCalc }; });
+    const sum = (arr, key) => arr.filter(c => c.name).reduce((s, c) => s + (c[key] || 0), 0);
+    return {
+      minCalcs, maxCalcs,
+      minTotals: { license: sum(minCalcs, "license"), mig: sum(minCalcs, "mig"), dep: sum(minCalcs, "dep"), mnt: sum(minCalcs, "mnt"), total: sum(minCalcs, "total") },
+      maxTotals: { license: sum(maxCalcs, "license"), mig: sum(maxCalcs, "mig"), dep: sum(maxCalcs, "dep"), mnt: sum(maxCalcs, "mnt"), total: sum(maxCalcs, "total") }
+    };
+  }, [products, settings.users]);
+
+  return (
+    <div style={{ fontFamily: "'DM Sans', system-ui, sans-serif", background: COLORS.bg, minHeight: "100vh", color: COLORS.dark }}>
+      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "20px 16px" }}>
+        <div style={{ textAlign: "center", marginBottom: 16 }}>
+          <h1 style={{ fontSize: 22, fontWeight: 700, color: COLORS.primary, margin: 0, letterSpacing: -0.5 }}>Financial Proposal Configurator</h1>
+          {settings.client && <div style={{ fontSize: 13, color: COLORS.muted, marginTop: 4 }}>Prepared for: <strong style={{ color: COLORS.primary }}>{settings.client}</strong></div>}
+        </div>
+        <Nav page={page} setPage={setPage} />
+        {page === "settings" && <SettingsPage settings={settings} setSettings={setSettings} products={products} setProducts={setProducts} addlConfigs={addlConfigs} setAddlConfigs={setAddlConfigs} sectionDescs={sectionDescs} setSectionDescs={setSectionDescs} />}
+        {page === "proposal" && <ProposalPage settings={settings} products={products} addlConfigs={addlConfigs} minTotals={calcsData.minTotals} maxTotals={calcsData.maxTotals} sectionDescs={sectionDescs} />}
+        {page === "aggregate" && <AggregatePage minTotals={calcsData.minTotals} maxTotals={calcsData.maxTotals} />}
+        {page === "dashboard" && <DashboardPage settings={settings} products={products} minTotals={calcsData.minTotals} maxTotals={calcsData.maxTotals} />}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.render(<App />, document.getElementById('root'));
+</script>
+</body>
+</html>
